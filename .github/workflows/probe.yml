@@ -1,0 +1,401 @@
+name: probe
+
+on:
+  push:
+    branches: ['probe/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  NO_COLOR: '1'
+  NODE_VERSION: 24.21.0
+  PNPM_VERSION: 12.11.2
+  TAURI_DRIVER_VERSION: 2.1.0
+  E2E_RUNS: '5'
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, os: ubuntu-24.04, bundles: 'deb,appimage' }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, bundles: 'deb,appimage' }
+          - { name: windows-x64, os: windows-2025, bundles: 'msi,nsis' }
+          - { name: windows-arm64, os: windows-11-arm, bundles: 'msi,nsis' }
+          - { name: macos-arm64, os: macos-26, bundles: 'app,dmg' }
+          - { name: macos-x64, os: macos-26-intel, bundles: 'app,dmg' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # ---- setup: a failure here fails the job outright --------------------------------------
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Job environment
+        run: |
+          mkdir -p "$RUNNER_TEMP/notes" "$RUNNER_TEMP/pnpm-store"
+          {
+            echo "NOTES_DIR=$RUNNER_TEMP/notes"
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            if [ "$RUNNER_OS" = Windows ]; then echo "EXE=.exe"; else echo "EXE="; fi
+          } >>"$GITHUB_ENV"
+
+      - name: Cache cargo registry, tauri-driver and pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/tauri-driver*
+            ${{ runner.temp }}/pnpm-store
+          key: deps-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'ui/pnpm-lock.yaml', 'rust-toolchain.toml') }}
+          restore-keys: deps-${{ matrix.name }}-
+
+      - name: Install pnpm
+        run: npm install --global "pnpm@$PNPM_VERSION"
+
+      - name: Install Linux packages (WebKitGTK, its WebDriver, Xvfb, keyring)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            webkit2gtk-driver xvfb xauth dbus-x11 at-spi2-core gnome-keyring file xdg-utils
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Record versions
+        run: |
+          {
+            echo "runner image=$ImageOS $ImageVersion ($RUNNER_ARCH)"
+            echo "rustc=$(rustc --version --verbose | tr '\n' ' ')"
+            echo "cargo=$(cargo --version)"
+            echo "node=$(node --version)"
+            echo "pnpm=$(pnpm --version)"
+            echo "cmake=$(cmake --version 2>/dev/null | head -n 1 || echo 'not found')"
+            echo "nasm=$(nasm -v 2>/dev/null || echo 'not found')"
+            echo "clang=$(clang --version 2>/dev/null | head -n 1 || echo 'not found')"
+            case "$RUNNER_OS" in
+              Linux)
+                echo "os=$(. /etc/os-release && echo "$PRETTY_NAME") kernel $(uname -r)"
+                echo "webview=WebKitGTK $(dpkg-query -W -f='${Version}' libwebkit2gtk-4.1-0)"
+                echo "native webdriver=WebKitWebDriver, package webkit2gtk-driver $(dpkg-query -W -f='${Version}' webkit2gtk-driver)"
+                ;;
+              macOS)
+                echo "os=macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+                echo "webview=WKWebView, WebKit $(defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info CFBundleVersion 2>/dev/null || echo unknown), Safari $(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString 2>/dev/null || echo unknown)"
+                echo "xcode=$(xcodebuild -version 2>/dev/null | tr '\n' ' ')"
+                ;;
+              Windows)
+                echo "os=$(cmd //c ver | tr -d '\r\n')"
+                ;;
+            esac
+          } | tee "$NOTES_DIR/versions"
+
+      - name: 'Windows: WebView2 runtime and the matching msedgedriver'
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $client = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $keys = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$client",
+                  "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$client",
+                  "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$client"
+          function Get-WebView2Version {
+            $keys | ForEach-Object { (Get-ItemProperty -Path $_ -ErrorAction SilentlyContinue).pv } |
+              Where-Object { $_ -and $_ -ne '0.0.0.0' } | Select-Object -First 1
+          }
+          $version = Get-WebView2Version
+          $origin = 'preinstalled on the runner image'
+          if (-not $version) {
+            Write-Host 'WebView2 runtime not found, installing the Evergreen runtime'
+            $setup = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
+            Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -Wait
+            $version = Get-WebView2Version
+            $origin = 'installed by this job (Evergreen bootstrapper)'
+          }
+          if (-not $version) { throw 'WebView2 runtime is not available' }
+          "webview=WebView2 $version, $origin" >> (Join-Path $env:NOTES_DIR 'versions')
+
+          # msedgedriver must match the WebView2 runtime, which is not necessarily the Edge browser version.
+          $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'win64' }
+          $dir = Join-Path $env:RUNNER_TEMP 'msedgedriver'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          try {
+            Invoke-WebRequest "https://msedgedriver.microsoft.com/$version/edgedriver_$arch.zip" -OutFile "$dir\driver.zip"
+            Expand-Archive "$dir\driver.zip" $dir -Force
+            $driver = Join-Path $dir 'msedgedriver.exe'
+            $source = 'downloaded for the WebView2 version'
+          } catch {
+            Write-Host "Download failed ($_), falling back to the driver shipped with the runner image"
+            $driver = Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe'
+            $source = 'runner image (download for the WebView2 version failed)'
+          }
+          $driverVersion = (& $driver --version) -join ' '
+          "native webdriver=$driverVersion, $source" >> (Join-Path $env:NOTES_DIR 'versions')
+          "NATIVE_DRIVER=$driver" >> $env:GITHUB_ENV
+          Get-Content (Join-Path $env:NOTES_DIR 'versions')
+
+      # ---- checks: each one may fail without stopping the job; the last step gives the verdict ----
+      - name: '1a. Build core crates (aws-lc-sys, RustCrypto, dalek, keyring)'
+        id: core_build
+        continue-on-error: true
+        timeout-minutes: 30
+        run: cargo build -p probe-core -p probe-server --all-targets --locked
+
+      - name: '1a. Retry on Windows with prebuilt NASM objects for aws-lc-sys'
+        id: core_build_nasm
+        if: steps.core_build.outcome == 'failure' && runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          echo "AWS_LC_SYS_PREBUILT_NASM=1" >>"$GITHUB_ENV"
+          AWS_LC_SYS_PREBUILT_NASM=1 cargo build -p probe-core -p probe-server --all-targets --locked
+          echo "first attempt failed; passed with AWS_LC_SYS_PREBUILT_NASM=1" >"$NOTES_DIR/core_build"
+
+      - name: '1b. Unit tests: client against the local server, crypto known-answer tests'
+        id: core_test
+        continue-on-error: true
+        timeout-minutes: 15
+        run: cargo test -p probe-core -p probe-server --locked --lib --bins --test api --test kat --test store
+
+      - name: '2. TLS: reqwest + rustls + aws-lc-rs + platform verifier with a custom CA (HTTPS and WSS)'
+        id: tls
+        continue-on-error: true
+        timeout-minutes: 10
+        run: cargo test -p probe-core --locked --test tls -- --nocapture
+
+      - name: '3. Secret storage: keyring on the native OS backend'
+        id: keyring
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              dbus-run-session -- bash -c 'echo -n probe | gnome-keyring-daemon --components=secrets --daemonize --unlock >/dev/null && cargo test -p probe-core --locked --test store -- --ignored'
+              echo "Secret Service: gnome-keyring under a private D-Bus session" >"$NOTES_DIR/keyring"
+              ;;
+            macOS)
+              cargo test -p probe-core --locked --test store -- --ignored
+              echo "Keychain: default login keychain of the runner user, no blocking prompt" >"$NOTES_DIR/keyring"
+              ;;
+            Windows)
+              cargo test -p probe-core --locked --test store -- --ignored
+              echo "Credential Manager" >"$NOTES_DIR/keyring"
+              ;;
+          esac
+
+      - name: '3. Retry on macOS with a temporary unlocked keychain'
+        id: keyring_tmp
+        if: steps.keyring.outcome == 'failure' && runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          keychain="$RUNNER_TEMP/probe.keychain-db"
+          previous=$(security default-keychain -d user | tr -d ' "')
+          security create-keychain -p probe "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p probe "$keychain"
+          security list-keychains -d user -s "$keychain" "$previous"
+          security default-keychain -d user -s "$keychain"
+          status=0
+          cargo test -p probe-core --locked --test store -- --ignored || status=$?
+          security default-keychain -d user -s "$previous"
+          security list-keychains -d user -s "$previous"
+          security delete-keychain "$keychain"
+          if [ "$status" -eq 0 ]; then
+            echo "default login keychain failed or blocked; passed with a temporary unlocked keychain" >"$NOTES_DIR/keyring"
+          fi
+          exit "$status"
+
+      - name: '4a. Frontend: pnpm install --frozen-lockfile'
+        id: fe_install
+        continue-on-error: true
+        timeout-minutes: 15
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: '4b. Frontend: tsc --noEmit'
+        id: fe_typecheck
+        continue-on-error: true
+        working-directory: ui
+        run: pnpm typecheck
+
+      - name: '4c. Frontend: vitest run'
+        id: fe_test
+        continue-on-error: true
+        working-directory: ui
+        run: pnpm test
+
+      - name: '4d. Frontend: vite build'
+        id: fe_build
+        continue-on-error: true
+        working-directory: ui
+        run: pnpm build
+
+      - name: '1c. Build the whole workspace, all targets (includes the Tauri app)'
+        id: ws_build
+        continue-on-error: true
+        timeout-minutes: 40
+        run: cargo build --workspace --all-targets --locked
+
+      - name: '1d. App unit tests on the Tauri mock runtime'
+        id: app_test
+        continue-on-error: true
+        timeout-minutes: 15
+        run: cargo test -p probe-app --locked
+
+      - name: '4e. tauri build: unsigned release bundles'
+        id: bundle
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          CI: 'true'
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          set -o pipefail
+          ui/node_modules/.bin/tauri build --bundles '${{ matrix.bundles }}' 2>&1 | tee "$RUNNER_TEMP/bundle.log"
+          if [ "$RUNNER_OS" = macOS ]; then
+            tar -czf target/release/bundle/macos/Probe.app.tar.gz -C target/release/bundle/macos Probe.app
+          fi
+          {
+            find target/release/bundle -maxdepth 2 -type f \
+              \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.tar.gz' -o -name '*.msi' -o -name '*.exe' \) \
+              -exec ls -l {} \; | awk '{ printf "%s (%.1f MB); ", $NF, $5 / 1048576 }'
+            echo "warnings: $(grep -c -i -E 'warn|sign' "$RUNNER_TEMP/bundle.log" || true) (see the step log)"
+          } >"$NOTES_DIR/bundle"
+          grep -i -E 'warn|sign' "$RUNNER_TEMP/bundle.log" || true
+
+      - name: Upload bundles
+        if: steps.bundle.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundles-${{ matrix.name }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.tar.gz
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+
+      - name: '5. Launch the release binary: window, IPC, CSP, tray, single instance'
+        id: launch
+        continue-on-error: true
+        timeout-minutes: 10
+        run: bash scripts/gui.sh node scripts/launch-check.mjs "target/release/probe-app$EXE" "target/debug/probe-server$EXE"
+
+      - name: '6a. Install tauri-driver for the external driver'
+        id: tauri_driver
+        if: runner.os != 'macOS'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          if ! command -v tauri-driver >/dev/null; then
+            cargo install tauri-driver --version "$TAURI_DRIVER_VERSION" --locked
+          fi
+          echo "tauri-driver=$TAURI_DRIVER_VERSION" >>"$NOTES_DIR/versions"
+
+      - name: '6a. E2E, external driver (tauri-driver + OS webview driver), release build'
+        id: e2e_external
+        if: runner.os != 'macOS'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: bash scripts/e2e.sh external
+
+      - name: '6a. E2E, external driver: SKIPPED on macOS (no WebDriver exists for WKWebView)'
+        if: runner.os == 'macOS'
+        run: |
+          echo "not applicable on macOS, there is no WebDriver for WKWebView" >"$NOTES_DIR/e2e_external"
+
+      - name: '6b. Build the app with the embedded WebDriver server (feature e2e, debug)'
+        id: e2e_build
+        continue-on-error: true
+        timeout-minutes: 30
+        run: cargo build -p probe-app --features custom-protocol,e2e --locked
+
+      - name: '6b. E2E, embedded driver (WebDriver server inside the app), debug build'
+        id: e2e_embedded
+        continue-on-error: true
+        timeout-minutes: 20
+        run: bash scripts/e2e.sh embedded
+
+      - name: '6c. E2E self-check: a deliberately wrong expectation must fail the run'
+        id: e2e_selfcheck
+        if: steps.e2e_embedded.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          E2E_BREAK: '1'
+          E2E_ARTIFACTS: ${{ github.workspace }}/ui/e2e/artifacts/selfcheck
+          NOTES_DIR: ''
+        run: |
+          if bash scripts/e2e.sh embedded 1; then
+            echo "the suite passed with a broken expectation"
+            exit 1
+          fi
+          echo "the suite failed as it must"
+
+      - name: Upload E2E screenshots and driver logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-${{ matrix.name }}
+          retention-days: 3
+          if-no-files-found: ignore
+          path: ui/e2e/artifacts/
+
+      # ---- summary and verdict ----------------------------------------------------------------
+      - name: '7. Summary'
+        id: summary
+        if: always()
+        env:
+          JOB_NAME: ${{ matrix.name }} (${{ matrix.os }})
+          RESULTS: |
+            core_build|1a. Build core crates (aws-lc-sys, crypto, keyring)|${{ steps.core_build.outcome == 'success' && 'success' || steps.core_build_nasm.outcome }}
+            core_test|1b. Unit tests and crypto known-answer tests|${{ steps.core_test.outcome }}
+            ws_build|1c. Build whole workspace, all targets|${{ steps.ws_build.outcome }}
+            app_test|1d. App unit tests (Tauri mock runtime)|${{ steps.app_test.outcome }}
+            tls|2. TLS with custom CA: HTTPS + WSS, foreign CA refused|${{ steps.tls.outcome }}
+            keyring|3. Secret storage on the native backend|${{ steps.keyring.outcome == 'success' && 'success' || steps.keyring_tmp.outcome }}
+            fe_install|4a. pnpm install --frozen-lockfile|${{ steps.fe_install.outcome }}
+            fe_typecheck|4b. tsc --noEmit|${{ steps.fe_typecheck.outcome }}
+            fe_test|4c. vitest run|${{ steps.fe_test.outcome }}
+            fe_build|4d. vite build|${{ steps.fe_build.outcome }}
+            bundle|4e. tauri build (${{ matrix.bundles }}), unsigned|${{ steps.bundle.outcome }}
+            launch|5. Launch release binary: window, IPC, CSP, tray, single instance|${{ steps.launch.outcome }}
+            e2e_external|6a. E2E external driver x${{ env.E2E_RUNS }}|${{ runner.os == 'macOS' && 'n/a' || steps.e2e_external.outcome }}
+            e2e_embedded|6b. E2E embedded driver x${{ env.E2E_RUNS }}|${{ steps.e2e_build.outcome == 'success' && steps.e2e_embedded.outcome || steps.e2e_build.outcome }}
+            e2e_selfcheck|6c. E2E self-check: broken expectation fails|${{ steps.e2e_embedded.outcome == 'success' && steps.e2e_selfcheck.outcome || 'n/a' }}
+        run: bash scripts/summary.sh
+
+      - name: Verdict (fails if any required check did not pass)
+        if: always()
+        run: |
+          echo "checks not passed: ${{ steps.summary.outputs.failed }}"
+          test "${{ steps.summary.outputs.failed }}" = "0"

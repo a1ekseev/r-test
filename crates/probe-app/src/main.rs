@@ -1,0 +1,31 @@
+//! Tauri shell: window, tray, single instance. All logic lives in `probe-core`.
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!("feature `e2e` (embedded WebDriver server) must never be enabled in a release build");
+
+mod commands;
+mod setup;
+#[cfg(test)]
+mod tests;
+
+use tauri::Emitter as _;
+
+fn main() {
+    let url = std::env::var("PROBE_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:4000".to_owned());
+    let memory = std::env::var("PROBE_SECRET_STORE").is_ok_and(|v| v == "memory");
+    let state = setup::AppState::new(&url, memory).expect("client setup");
+
+    // Must be the first plugin: a second launch exits here and notifies the running instance.
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        println!("PROBE_SECOND_INSTANCE");
+        drop(app.emit("second-instance", ()));
+    }));
+    let builder = setup::configure(builder, state).setup(|app| {
+        setup::install_tray(app)?;
+        Ok(())
+    });
+    #[cfg(feature = "e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder.run(tauri::generate_context!()).expect("run the application");
+}

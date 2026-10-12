@@ -1,0 +1,94 @@
+:root {
+  --ink: #1d2733;
+  --paper: #f7f8fa;
+  --accent: #2f6fde;
+  --danger: #b3261e;
+  --line: #c9d1dc;
+
+  color: var(--ink);
+  background: var(--paper);
+  font-family: "Inter Variable", system-ui, sans-serif;
+  font-size: 15px;
+}
+
+body {
+  margin: 0;
+  padding: 24px;
+}
+
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+main {
+  margin: 32px 0;
+}
+
+form {
+  display: grid;
+  gap: 8px;
+  max-width: 320px;
+}
+
+input,
+button,
+.select-trigger {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+button[type="submit"] {
+  border-color: var(--accent);
+  color: #fff;
+  background: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+[role="alert"] {
+  color: var(--danger);
+}
+
+.select-popup {
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.select-item {
+  padding: 6px 12px;
+  cursor: default;
+}
+
+.select-item[data-highlighted] {
+  color: #fff;
+  background: var(--accent);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+}
+
+dd {
+  margin: 0;
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+}

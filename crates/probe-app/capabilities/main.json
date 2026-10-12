@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "The only capability: the main window may listen to events. App commands need no permission.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

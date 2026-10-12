@@ -1,0 +1,10 @@
+import '@fontsource-variable/inter/wght.css';
+import './styles.css';
+import { createRoot } from 'react-dom/client';
+import { App } from './App';
+import { announceReady, install } from './problems';
+
+install();
+const root = document.getElementById('root');
+if (root) createRoot(root).render(<App />);
+void announceReady();

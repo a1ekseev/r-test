@@ -1,0 +1,38 @@
+[package]
+name = "probe-core"
+description = "Client library of the probe: HTTP, WebSocket, TLS config, signing, secret storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "net"] }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+keyring = { workspace = true }
+gethostname = { workspace = true }
+os_info = { workspace = true }
+iana-time-zone = { workspace = true }
+
+[dev-dependencies]
+probe-server = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util"] }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true }
+time = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+blake2 = { workspace = true }
+x25519-dalek = { workspace = true }
+crypto_box = { workspace = true }
+crypto_secretbox = { workspace = true }

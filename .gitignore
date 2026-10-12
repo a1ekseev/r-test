@@ -1,0 +1,10 @@
+target/
+node_modules/
+.pnpm-store/
+ui/dist/
+ui/e2e/artifacts/
+crates/probe-app/gen/
+.env*
+*.pem
+*.key
+*.p12
