@@ -58,24 +58,28 @@ const VARIANTS = {
   'incognito-break': { incognito: true, crash: 'break' },
   'normal-break-nobreakpad': { crash: 'break', browserArgs: `${DEFAULT_ARGS} --disable-breakpad` },
   'normal-break-nocrashpad': { crash: 'break', browserArgs: `${DEFAULT_ARGS} --disable-crashpad-for-testing` },
+  // Windows: form suggestions (autofill) switched off
+  'normal-noautofill': { env: { PROBE_AUTOFILL: '0' } },
   // macOS: saved application state. The default leave is -[NSApplication terminate:] (Cmd+Q).
   'normal-appexit': { quit: '--quit' },
   'normal-sigterm': { quit: '' },
-  'normal-sigterm-norestore': { quit: '', env: { PROBE_RESTORABLE: '0' } },
   'normal-keep': { defaults: { NSQuitAlwaysKeepsWindows: 'true' } },
   'normal-keep-norestore': { defaults: { NSQuitAlwaysKeepsWindows: 'true' }, env: { PROBE_RESTORABLE: '0' } },
   'normal-keep-ignorestate': { defaults: { NSQuitAlwaysKeepsWindows: 'true' }, appArgs: '-ApplePersistenceIgnoreState YES' },
   'incognito-keep': { incognito: true, defaults: { NSQuitAlwaysKeepsWindows: 'true' } },
+  // the same switch as a user-wide setting, then overridden for this app on its command line
+  'normal-globalkeep': { defaults: { NSQuitAlwaysKeepsWindows: 'true' }, domain: '-g' },
+  'normal-globalkeep-argoff': { defaults: { NSQuitAlwaysKeepsWindows: 'true' }, domain: '-g', appArgs: '-NSQuitAlwaysKeepsWindows NO' },
 };
 const PLAN = {
   linux: ['incognito', 'normal', 'normal-datadir', 'incognito-strace', 'normal-strace', 'normal-abort'],
   darwin: [
-    'incognito', 'normal', 'normal-appexit', 'normal-sigterm', 'normal-sigterm-norestore', 'normal-keep',
-    'normal-keep-norestore', 'normal-keep-ignorestate', 'incognito-keep', 'normal-abort',
+    'incognito', 'normal', 'normal-appexit', 'normal-sigterm', 'normal-keep', 'normal-keep-norestore',
+    'normal-keep-ignorestate', 'incognito-keep', 'normal-globalkeep', 'normal-globalkeep-argoff', 'normal-abort',
   ],
   win32: [
-    'incognito', 'normal', 'normal-datadir', 'normal-kill', 'normal-fault', 'normal-break', 'incognito-break',
-    'normal-break-nobreakpad', 'normal-break-nocrashpad',
+    'incognito', 'normal', 'normal-noautofill', 'normal-datadir', 'normal-kill', 'normal-fault', 'normal-break',
+    'incognito-break', 'normal-break-nobreakpad', 'normal-break-nocrashpad',
   ],
 };
 
@@ -181,7 +185,10 @@ function scan(changes, marker) {
     if (type !== 'f') continue;
     try {
       if (size > 2 ** 30) throw Object.assign(new Error('too large'), { code: 'TOO_LARGE' });
-      const found = search(fs.readFileSync(path), marker);
+      // a compressed core dump is searched after decompression
+      const packed = path.endsWith('.zst') ? spawnSync('zstd', ['-dc', path], { maxBuffer: 2 ** 31 - 1 }) : undefined;
+      if (packed && packed.status !== 0) throw Object.assign(new Error('zstd failed'), { code: 'ZSTD' });
+      const found = search(packed ? packed.stdout : fs.readFileSync(path), marker);
       if (found.length > 0) hits[path] = found;
     } catch (e) {
       hits[path] = [`unreadable:${e.code}`];
@@ -214,6 +221,8 @@ function selftest() {
   fs.writeFileSync(file('body'), Buffer.concat([noise, Buffer.from(`gnp.eborp-egami-${flip(marker)}`)]));
   fs.writeFileSync(file('two'), `${marker}-code-123456 ${marker}-local ${marker}`);
   fs.writeFileSync(file('clean'), noise);
+  const zstd = sh('zstd', ['-q', '-o', file('packed.zst')], { input: Buffer.concat([noise, Buffer.from(`${marker}-message-welcome`)]) }).status === 0;
+  if (!zstd) console.log('note: zstd is not available here, compressed dumps will be reported as unreadable');
   fs.writeFileSync(file('nearly'), marker.slice(0, -1));
   fs.appendFileSync(file('to-change'), `two ${marker}-message-welcome`);
   fs.rmSync(file('to-remove'));
@@ -222,7 +231,7 @@ function selftest() {
   const changes = diff(before, snapshot([dir], new Set()));
   const names = (entries) => entries.map(([path]) => path.slice(dir.length + 1)).sort();
 
-  check('new files are reported', names(changes.added), ['ascii', 'body', 'clean', 'nearly', 'two', 'utf16']);
+  check('new files are reported', names(changes.added), ['ascii', 'body', 'clean', 'nearly', ...(zstd ? ['packed.zst'] : []), 'two', 'utf16']);
   check('a changed file is reported', names(changes.changed), ['to-change']);
   check('a removed file is reported', names(changes.removed), ['to-remove']);
   // a file that came and went leaves only the mtime of its directory behind
@@ -234,6 +243,7 @@ function selftest() {
     {
       ascii: ['email/ascii'],
       body: ['imagebody/ascii'],
+      ...(zstd ? { 'packed.zst': ['message/ascii'] } : {}),
       'to-change': ['message/ascii'],
       two: ['bare/ascii', 'code/ascii', 'local/ascii'],
       utf16: ['token/utf16'],
@@ -503,7 +513,7 @@ function run(names) {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true });
     if (name !== names[0]) start = reset(baseline, noise);
-    for (const [key, value] of Object.entries(variant.defaults ?? {})) sh('defaults', ['write', APP_ID, key, '-bool', value]);
+    for (const [key, value] of Object.entries(variant.defaults ?? {})) sh('defaults', ['write', variant.domain ?? APP_ID, key, '-bool', value]);
     const before = variant.defaults ? snapshot() : start;
     save(join(dir, 'before.json'), before);
 
@@ -596,7 +606,7 @@ function run(names) {
     for (const [key, item] of folded.slice(0, 150)) details.push(`| ${key.split('\t').join(' | ')} | ${item.files} | ${item.bytes} |`);
     if (folded.length > 150) details.push(`| | | ${folded.length - 150} more directories, see files.tsv | | |`);
     details.push('', '</details>', '');
-    for (const key of Object.keys(variant.defaults ?? {})) sh('defaults', ['delete', APP_ID, key]);
+    for (const key of Object.keys(variant.defaults ?? {})) sh('defaults', ['delete', variant.domain ?? APP_ID, key]);
   }
 
   say();

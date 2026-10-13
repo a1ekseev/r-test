@@ -59,7 +59,8 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>, state: Ap
 /// Creates the main window from the config. Switches read from the environment, so that one
 /// binary can be observed in every mode: `PROBE_INCOGNITO=1`, `PROBE_BROWSER_ARGS=<args>`
 /// (WebView2 only; replaces the default arguments), `PROBE_DATA_DIR=<absolute path>` (webview data
-/// directory, not on macOS), `PROBE_RESTORABLE=0` (macOS only).
+/// directory, not on macOS), `PROBE_AUTOFILL=0` (WebView2 only: no form suggestions),
+/// `PROBE_RESTORABLE=0` (macOS only).
 pub(crate) fn create_window(app: &tauri::App) -> tauri::Result<()> {
     let mut config = app.config().app.windows.first().cloned().unwrap_or_default();
     config.incognito = flag("PROBE_INCOGNITO");
@@ -69,6 +70,9 @@ pub(crate) fn create_window(app: &tauri::App) -> tauri::Result<()> {
     let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
     if let Ok(dir) = std::env::var("PROBE_DATA_DIR") {
         builder = builder.data_directory(dir.into());
+    }
+    if std::env::var("PROBE_AUTOFILL").is_ok_and(|v| v == "0") {
+        builder = builder.general_autofill_enabled(false);
     }
     let window = builder.build()?;
     #[cfg(target_os = "macos")]

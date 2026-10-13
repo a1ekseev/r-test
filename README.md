@@ -46,7 +46,8 @@ does not stop the job, and the last step fails the job if any required check fai
    comparison and the search can fail.
 
 The window is created in `setup` so that its mode can be chosen at run time: `PROBE_INCOGNITO=1`,
-`PROBE_DATA_DIR=<path>`, `PROBE_BROWSER_ARGS=<args>` (WebView2), `PROBE_RESTORABLE=0` (macOS).
+`PROBE_DATA_DIR=<path>`, `PROBE_BROWSER_ARGS=<args>` and `PROBE_AUTOFILL=0` (WebView2),
+`PROBE_RESTORABLE=0` (macOS).
 A second launch with `--quit` (or `--terminate`, the Cmd+Q path on macOS) ends the running instance.
 
 ## Running locally on Linux (Docker)
