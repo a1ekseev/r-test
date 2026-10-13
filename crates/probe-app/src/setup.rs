@@ -84,17 +84,22 @@ pub(crate) fn create_window(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Leaves the way Cmd+Q does on macOS, through `-[NSApplication terminate:]`.
+/// Leaves the way Cmd+Q does on macOS, through `-[NSApplication terminate:]`. The message is queued
+/// on the main run loop rather than sent from inside an event callback of the windowing library,
+/// where the termination would wait for that same callback to return.
 #[cfg(target_os = "macos")]
-pub(crate) fn terminate(app: &tauri::AppHandle) {
-    drop(app.run_on_main_thread(|| {
-        use objc2::runtime::AnyObject;
-        // SAFETY: plain AppKit messages, sent on the main thread
-        unsafe {
-            let ns_app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
-            let () = objc2::msg_send![ns_app, terminate: std::ptr::null_mut::<AnyObject>()];
-        }
-    }));
+pub(crate) fn terminate(_app: &tauri::AppHandle) {
+    use objc2::runtime::AnyObject;
+    // SAFETY: plain AppKit messages; performSelectorOnMainThread may be sent from any thread
+    unsafe {
+        let ns_app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let () = objc2::msg_send![
+            ns_app,
+            performSelectorOnMainThread: objc2::sel!(terminate:),
+            withObject: std::ptr::null_mut::<AnyObject>(),
+            waitUntilDone: false
+        ];
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -31,7 +31,7 @@ const platform = process.platform;
 const exe = platform === 'win32' ? '.exe' : '';
 const out = resolve(process.env.DISK_OUT ?? join(repo, 'ui/e2e/artifacts/disk'));
 const serverBin = process.env.SERVER_BIN ?? join(repo, `target/debug/probe-server${exe}`);
-const builtApp = process.env.APP_BIN ?? join(repo, `target/debug/probe-app${exe}`);
+const builtApp = process.env.DISK_BUILT_APP ?? process.env.APP_BIN ?? join(repo, `target/debug/probe-app${exe}`);
 // macOS: the same binary inside a minimal bundle, so that it runs under its bundle identifier
 const bundle = join(repo, 'target/disk-probe/Probe.app');
 const appBin = platform === 'darwin' ? join(bundle, 'Contents/MacOS/probe-app') : builtApp;
@@ -50,12 +50,14 @@ const VARIANTS = {
   'normal-strace': { strace: true },
   // Linux, macOS: the web content process is aborted (SIGABRT): is a dump or report written, and what is in it
   'normal-abort': { crash: 'abort' },
-  // Windows: the renderer is ended from outside (no fault), then made to fault
+  // Windows: the renderer is ended from outside (no fault), gets a thread at an invalid address (the
+  // system fails it fast), gets a thread that raises a breakpoint exception nobody handles
   'normal-kill': { crash: 'kill' },
   'normal-fault': { crash: 'fault' },
-  'incognito-fault': { incognito: true, crash: 'fault' },
-  'normal-fault-nobreakpad': { crash: 'fault', browserArgs: `${DEFAULT_ARGS} --disable-breakpad` },
-  'normal-fault-nocrashpad': { crash: 'fault', browserArgs: `${DEFAULT_ARGS} --disable-crashpad-for-testing` },
+  'normal-break': { crash: 'break' },
+  'incognito-break': { incognito: true, crash: 'break' },
+  'normal-break-nobreakpad': { crash: 'break', browserArgs: `${DEFAULT_ARGS} --disable-breakpad` },
+  'normal-break-nocrashpad': { crash: 'break', browserArgs: `${DEFAULT_ARGS} --disable-crashpad-for-testing` },
   // macOS: saved application state. The default leave is -[NSApplication terminate:] (Cmd+Q).
   'normal-appexit': { quit: '--quit' },
   'normal-sigterm': { quit: '' },
@@ -72,8 +74,8 @@ const PLAN = {
     'normal-keep-norestore', 'normal-keep-ignorestate', 'incognito-keep', 'normal-abort',
   ],
   win32: [
-    'incognito', 'normal', 'normal-datadir', 'normal-kill', 'normal-fault', 'incognito-fault', 'normal-fault-nobreakpad',
-    'normal-fault-nocrashpad',
+    'incognito', 'normal', 'normal-datadir', 'normal-kill', 'normal-fault', 'normal-break', 'incognito-break',
+    'normal-break-nobreakpad', 'normal-break-nocrashpad',
   ],
 };
 
@@ -266,7 +268,7 @@ function timed(what, action) {
 /** Processes of the app and its webview, with command lines. */
 function processes() {
   const listing = {
-    linux: () => sh('ps', ['-eww', '-o', 'pid,ppid,args']),
+    linux: () => sh('ps', ['-eww', '-o', 'pid,ppid,stat,args']),
     darwin: () => sh('ps', ['-axww', '-o', 'pid,ppid,command']),
     win32: () =>
       sh('powershell', ['-NoProfile', '-NonInteractive', '-Command',
@@ -276,7 +278,8 @@ function processes() {
 }
 
 // Windows: finds the renderer of the app's webview; "kill" ends it, "fault" starts a thread at an
-// invalid address inside it, which is a genuine access violation in that process.
+// invalid address inside it, "break" starts a thread at DebugBreak (system libraries are mapped at
+// the same address in every process), which raises an exception that nothing in the renderer handles.
 const WINDOWS_CRASH = `
 $ErrorActionPreference = 'Stop'
 $renderer = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
@@ -290,11 +293,16 @@ if ($env:DISK_CRASH -eq 'kill') {
 } else {
   Add-Type -Namespace Probe -Name Native -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string name);
+[DllImport("kernel32.dll", CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr module, string name);
 [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr CreateRemoteThread(IntPtr process, IntPtr attributes, UIntPtr stack, IntPtr start, IntPtr parameter, uint flags, IntPtr id);
 '@
   $handle = [Probe.Native]::OpenProcess(0x1F0FFF, $false, [uint32]$target)
   if ($handle -eq [IntPtr]::Zero) { Write-Output "OpenProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"; exit 1 }
-  $thread = [Probe.Native]::CreateRemoteThread($handle, [IntPtr]::Zero, [UIntPtr]::Zero, [IntPtr]16, [IntPtr]::Zero, 0, [IntPtr]::Zero)
+  $start = [IntPtr]16
+  if ($env:DISK_CRASH -eq 'break') { $start = [Probe.Native]::GetProcAddress([Probe.Native]::GetModuleHandle('kernel32.dll'), 'DebugBreak') }
+  if ($start -eq [IntPtr]::Zero) { Write-Output 'DebugBreak not found'; exit 1 }
+  $thread = [Probe.Native]::CreateRemoteThread($handle, [IntPtr]::Zero, [UIntPtr]::Zero, $start, [IntPtr]::Zero, 0, [IntPtr]::Zero)
   if ($thread -eq [IntPtr]::Zero) { Write-Output "CreateRemoteThread failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"; exit 1 }
 }
 if (-not $process.WaitForExit(30000)) { Write-Output "renderer $target is still running"; exit 1 }
@@ -312,9 +320,12 @@ function crash(how) {
   const pids = processes().filter((line) => pattern.test(line)).map((line) => Number(line.trim().split(/\s+/)[0]));
   // SIGABRT, not SIGSEGV: the JavaScript engine installs a SIGSEGV handler that survives a signal sent from outside
   for (const pid of pids) process.kill(pid, 'SIGABRT');
+  // a core dump piped to a system service keeps the process around for a while
+  const alive = () => processes().filter((line) => pids.some((pid) => line.trim().startsWith(`${pid} `)));
+  for (let waited = 0; waited < 120_000 && alive().length > 0; waited += 5000) sleep(5000);
+  const left = alive();
   // crash reports are written by a system service after the process is gone
-  sleep(platform === 'darwin' ? 30_000 : 5_000);
-  const left = processes().filter((line) => pids.some((pid) => line.trim().startsWith(`${pid} `)));
+  sleep(platform === 'darwin' ? 30_000 : 10_000);
   return `SIGABRT sent to ${pids.length} web content process(es): ${pids.join(' ')}; still running afterwards: ${left.length}`;
 }
 
@@ -401,6 +412,7 @@ function scenario(name, variant, dir, marker, phase) {
     E2E_RUN: `-${phase}`,
     E2E_ARTIFACTS: join(dir, 'e2e'),
     APP_BIN: appBin,
+    DISK_BUILT_APP: builtApp,
     SERVER_BIN: serverBin,
     APP_WRAP: wrap,
     APP_ARGS: variant.appArgs ?? '',

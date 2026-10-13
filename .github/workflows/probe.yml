@@ -320,23 +320,11 @@ jobs:
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
 
-      - name: '5. Launch the release binary: window, IPC, CSP, tray, single instance'
-        id: launch
-        if: env.QUICK != 'true'
+      - name: '6b. Build the app with the embedded WebDriver server (feature e2e, debug)'
+        id: e2e_build
         continue-on-error: true
-        timeout-minutes: 10
-        run: bash scripts/gui.sh node scripts/launch-check.mjs "target/release/probe-app$EXE" "target/debug/probe-server$EXE"
-
-      - name: '6a. Install tauri-driver for the external driver'
-        id: tauri_driver
-        if: runner.os != 'macOS' && env.QUICK != 'true'
-        continue-on-error: true
-        timeout-minutes: 20
-        run: |
-          if ! command -v tauri-driver >/dev/null; then
-            cargo install tauri-driver --version "$TAURI_DRIVER_VERSION" --locked
-          fi
-          echo "tauri-driver=$TAURI_DRIVER_VERSION" >>"$NOTES_DIR/versions"
+        timeout-minutes: 30
+        run: cargo build -p probe-app --features custom-protocol,e2e --locked
 
       # WebView2 150+ ignores WEBVIEW2_* environment variables in an elevated process, and that is how
       # msedgedriver hands over the debugging port; the runner job is elevated (tauri-apps/wry#1782).
@@ -360,6 +348,43 @@ jobs:
           # a medium integrity token has no administrator rights, so open up what the tests write to
           icacls "$env:GITHUB_WORKSPACE" /grant 'Everyone:(OI)(CI)F' /Q
           icacls "$env:RUNNER_TEMP" /grant 'Everyone:(OI)(CI)F' /Q
+
+      # Runs before anything else starts the app, so that everything the app ever creates is new here.
+      # On Windows at medium integrity, like a user's session; the app is the debug build with the embedded driver.
+      - name: '8. Disk probe: what the app and its webview write, incognito window and regular'
+        id: disk
+        continue-on-error: true
+        timeout-minutes: 50
+        run: |
+          status=0
+          if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
+            gsudo --integrity Medium "$(cygpath -w "$BASH")" -c 'node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run' || status=$?
+          else
+            { node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run; } || status=$?
+          fi
+          if [ -f ui/e2e/artifacts/disk/summary.md ]; then
+            cat ui/e2e/artifacts/disk/summary.md >>"$GITHUB_STEP_SUMMARY"
+            grep -c '^| [a-z-]* | pass ' ui/e2e/artifacts/disk/summary.md | sed 's/$/ variant(s) ran their scenario; file lists and marker search results are below and in the artifact/' >"$NOTES_DIR/disk" || true
+          fi
+          exit "$status"
+
+      - name: '5. Launch the release binary: window, IPC, CSP, tray, single instance'
+        id: launch
+        if: env.QUICK != 'true'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: bash scripts/gui.sh node scripts/launch-check.mjs "target/release/probe-app$EXE" "target/debug/probe-server$EXE"
+
+      - name: '6a. Install tauri-driver for the external driver'
+        id: tauri_driver
+        if: runner.os != 'macOS' && env.QUICK != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          if ! command -v tauri-driver >/dev/null; then
+            cargo install tauri-driver --version "$TAURI_DRIVER_VERSION" --locked
+          fi
+          echo "tauri-driver=$TAURI_DRIVER_VERSION" >>"$NOTES_DIR/versions"
 
       - name: '6a. E2E, external driver (tauri-driver + OS webview driver), release build'
         id: e2e_external
@@ -401,12 +426,6 @@ jobs:
           echo "not applicable on macOS, there is no WebDriver for WKWebView" >"$NOTES_DIR/e2e_external"
           echo "not applicable on macOS, there is no WebDriver for WKWebView" >"$NOTES_DIR/e2e_external_incognito"
 
-      - name: '6b. Build the app with the embedded WebDriver server (feature e2e, debug)'
-        id: e2e_build
-        continue-on-error: true
-        timeout-minutes: 30
-        run: cargo build -p probe-app --features custom-protocol,e2e --locked
-
       - name: '6b. E2E, embedded driver (WebDriver server inside the app), debug build'
         id: e2e_embedded
         continue-on-error: true
@@ -434,24 +453,6 @@ jobs:
             exit 1
           fi
           echo "the suite failed as it must"
-
-      # On Windows at medium integrity, like a user's session; the app is the debug build with the embedded driver.
-      - name: '8. Disk probe: what the app and its webview write, incognito window and regular'
-        id: disk
-        continue-on-error: true
-        timeout-minutes: 50
-        run: |
-          status=0
-          if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
-            gsudo --integrity Medium "$(cygpath -w "$BASH")" -c 'node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run' || status=$?
-          else
-            { node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run; } || status=$?
-          fi
-          if [ -f ui/e2e/artifacts/disk/summary.md ]; then
-            cat ui/e2e/artifacts/disk/summary.md >>"$GITHUB_STEP_SUMMARY"
-            grep -c '^| [a-z-]* | pass ' ui/e2e/artifacts/disk/summary.md | sed 's/$/ variant(s) ran their scenario; file lists and marker search results are below and in the artifact/' >"$NOTES_DIR/disk" || true
-          fi
-          exit "$status"
 
       - name: Upload E2E screenshots, driver logs and disk probe results
         if: always()
