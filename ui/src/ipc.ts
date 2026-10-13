@@ -8,11 +8,15 @@ export interface Status {
   hostname: string;
   timezone: string;
   server: boolean;
+  serverUrl: string;
+  incognito: boolean;
 }
 
 export interface Session {
   stored: boolean;
   pong: number;
+  message: string;
+  image: string;
 }
 
 export const status = () => invoke<Status>('status');

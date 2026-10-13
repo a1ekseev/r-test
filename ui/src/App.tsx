@@ -1,5 +1,6 @@
 import { CSPProvider } from '@base-ui/react/csp-provider';
 import { Select } from '@base-ui/react/select';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { type FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { FormattedMessage, IntlProvider } from 'react-intl';
@@ -83,6 +84,10 @@ export function App() {
               <dt>websocket pong</dt>
               <dd data-testid="pong">{step.session.pong}</dd>
             </dl>
+            <p data-testid="message">{step.session.message}</p>
+            {/* the same image twice: straight from the demo server, and through the app's own protocol */}
+            {info && <img data-testid="image-direct" alt="" src={`${info.serverUrl}/image/${step.session.image}`} />}
+            <img data-testid="image-proxied" alt="" src={convertFileSrc(step.session.image, 'probe')} />
           </section>
         ) : (
           <form onSubmit={(e) => void submit(e)}>
@@ -108,6 +113,8 @@ export function App() {
           </dd>
           <dt>server</dt>
           <dd data-testid="server">{info ? (info.server ? 'up' : 'down') : ''}</dd>
+          <dt>incognito</dt>
+          <dd data-testid="incognito">{info ? (info.incognito ? 'yes' : 'no') : ''}</dd>
           <dt>second launches</dt>
           <dd data-testid="instances">{instances}</dd>
           <dt>problems</dt>

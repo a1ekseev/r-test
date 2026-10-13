@@ -16,6 +16,8 @@ describe('Probe app', () => {
     await expect($('h1')).toHaveText('Probe');
     await expect($('[data-testid="version"]')).toHaveText('0.1.0');
     await expect($('[data-testid="server"]')).toHaveText('up');
+    // proof that the window mode asked for reached the app through the whole driver chain
+    await expect($('[data-testid="incognito"]')).toHaveText(process.env['PROBE_INCOGNITO'] === '1' ? 'yes' : 'no');
   });
 
   it('login: a wrong code is rejected, the code issued by the server signs in', async () => {
@@ -35,6 +37,16 @@ describe('Probe app', () => {
     await expect($('[data-testid="signed-in"]')).toHaveText(process.env['E2E_BREAK'] ? 'broken' : 'Signed in');
     await expect($('[data-testid="stored"]')).toHaveText('yes');
     await expect($('[data-testid="pong"]')).toHaveText('7');
+  });
+
+  it('data: the server message is shown, both images load (direct and through the app protocol)', async () => {
+    await expect($('[data-testid="message"]')).toHaveText('welcome');
+    for (const id of ['image-direct', 'image-proxied']) {
+      await browser.waitUntil(
+        () => browser.execute((testid) => (document.querySelector<HTMLImageElement>(`[data-testid="${testid}"]`)?.naturalWidth ?? 0) > 0, id),
+        { timeoutMsg: `${id} did not load` },
+      );
+    }
   });
 
   it('widgets: the select switches the language, the modal dialog opens and closes', async () => {
@@ -67,10 +79,10 @@ describe('Probe app', () => {
     // the list is compared rather than the counter so that a failure names what was blocked
     await expect($('[data-testid="problem-list"]')).toHaveText('');
     await expect($('[data-testid="problems"]')).toHaveText('0');
-    // img-src allows only 'self', data: and blob:
+    // img-src allows 'self', data:, blob:, the app protocol and the demo server on 127.0.0.1, nothing else
     await browser.execute(() => {
       const img = document.createElement('img');
-      img.src = 'http://127.0.0.1:9/blocked.png';
+      img.src = 'http://localhost:9/blocked.png';
       document.body.append(img);
     });
     await expect($('[data-testid="problems"]')).toHaveText('1');

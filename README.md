@@ -15,7 +15,7 @@ one-time code) and a WebSocket `/ws` that answers ping with pong.
 | `crates/probe-server` | local demo server on `axum` (HTTP + WebSocket), library and binary |
 | `crates/probe-app` | Tauri 2 shell: window, tray, single instance, strict CSP, IPC commands |
 | `ui` | React + Vite + TypeScript frontend, Vitest component tests, WebdriverIO E2E |
-| `scripts` | launch check, E2E runner, CI summary, repository hygiene check |
+| `scripts` | launch check, E2E runner, disk probe, CI summary, repository hygiene check |
 | `docker` | Linux image for running everything locally |
 
 ## What CI checks
@@ -34,7 +34,20 @@ does not stop the job, and the last step fails the job if any required check fai
 6. The same WebdriverIO scenario with two drivers, five runs each:
    `external` (`tauri-driver` plus WebKitWebDriver or msedgedriver; not available on macOS) and
    `embedded` (`tauri-plugin-wdio-webdriver` behind the cargo feature `e2e`, debug builds only).
+   Each driver also runs against an incognito window (`PROBE_INCOGNITO=1`, same binaries). On
+   Linux the external driver cannot reach an incognito window, and the check asserts exactly that.
 7. A summary table per job.
+8. Disk probe (`scripts/disk-probe.mjs`): what the app and its webview leave on disk with an
+   incognito window and without. It compares file listings taken before, during and after a
+   scripted session, and searches every new or changed file for marker values that travelled
+   through the session (email, one-time code, token, server message, image name and bytes, a
+   localStorage value). Variants cover leaving, killing and crashing the app, the macOS saved
+   application state, and a relocated webview data directory. A self-test proves that the
+   comparison and the search can fail.
+
+The window is created in `setup` so that its mode can be chosen at run time: `PROBE_INCOGNITO=1`,
+`PROBE_DATA_DIR=<path>`, `PROBE_BROWSER_ARGS=<args>` (WebView2), `PROBE_RESTORABLE=0` (macOS).
+A second launch with `--quit` (or `--terminate`, the Cmd+Q path on macOS) ends the running instance.
 
 ## Running locally on Linux (Docker)
 
@@ -49,6 +62,8 @@ run 'APPIMAGE_EXTRACT_AND_RUN=1 ui/node_modules/.bin/tauri build --bundles deb,a
 run 'scripts/gui.sh node scripts/launch-check.mjs target/release/probe-app target/debug/probe-server'
 run 'scripts/e2e.sh external'
 run 'cargo build -p probe-app --features custom-protocol,e2e --locked && scripts/e2e.sh embedded'
+run 'scripts/e2e.sh embedded 1 incognito'
+run 'node scripts/disk-probe.mjs selftest && XDG_RUNTIME_DIR=/tmp/run node scripts/disk-probe.mjs run incognito normal'
 ```
 
 The keyring test needs an unlocked Secret Service:

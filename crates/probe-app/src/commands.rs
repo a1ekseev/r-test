@@ -9,6 +9,7 @@ use tauri::State;
 use crate::setup::AppState;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Status {
     version: &'static str,
     arch: &'static str,
@@ -17,6 +18,10 @@ pub(crate) struct Status {
     timezone: String,
     /// Whether the demo server answered `/ping`.
     server: bool,
+    /// Address of the demo server: the frontend loads one image straight from it.
+    server_url: String,
+    /// Whether the window was created in incognito mode.
+    incognito: bool,
 }
 
 #[tauri::command]
@@ -29,6 +34,8 @@ pub(crate) async fn status(state: State<'_, AppState>) -> Result<Status, String>
         hostname: device.hostname,
         timezone: device.timezone,
         server: state.client.ping().await.is_ok(),
+        server_url: state.client.base_url().to_owned(),
+        incognito: crate::setup::flag("PROBE_INCOGNITO"),
     })
 }
 
@@ -43,11 +50,16 @@ pub(crate) struct Session {
     stored: bool,
     /// Counter echoed by the WebSocket pong.
     pong: u64,
+    /// Text sent by the server for display.
+    message: String,
+    /// Name of the image to display.
+    image: String,
 }
 
 #[tauri::command]
 pub(crate) async fn confirm_code(state: State<'_, AppState>, email: String, code: String) -> Result<Session, String> {
-    let token = state.client.confirm_code(&email, &code).await.map_err(|e| e.to_string())?;
+    let probe_core::Login { token, message, image } =
+        state.client.confirm_code(&email, &code).await.map_err(|e| e.to_string())?;
     let store = Arc::clone(&state.store);
     // keyring backends block (and some drive their own runtime): keep them off the async executor
     let stored = tauri::async_runtime::spawn_blocking(move || {
@@ -58,7 +70,7 @@ pub(crate) async fn confirm_code(state: State<'_, AppState>, email: String, code
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("store: {e}"))?;
     let pong = state.client.ws_ping(7).await.map_err(|e| e.to_string())?;
-    Ok(Session { stored, pong })
+    Ok(Session { stored, pong, message, image })
 }
 
 /// Called once by the frontend after it has rendered and fonts have loaded.

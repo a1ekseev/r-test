@@ -55,6 +55,17 @@ pub fn device() -> Device {
     }
 }
 
+/// What a successful login returns.
+#[derive(Debug, Clone)]
+pub struct Login {
+    /// Session token.
+    pub token: String,
+    /// Text to show to the user.
+    pub message: String,
+    /// Name of an image served at `/image/<name>`.
+    pub image: String,
+}
+
 /// Client of the demo server.
 #[derive(Debug)]
 pub struct Client {
@@ -131,13 +142,32 @@ impl Client {
         self.login(&json!({ "email": email })).await.map(drop)
     }
 
-    /// Exchanges `email` + `code` for a session token.
+    /// Exchanges `email` + `code` for a session.
     ///
     /// # Errors
     /// Network failure or rejection (`bad_code`, ...).
-    pub async fn confirm_code(&self, email: &str, code: &str) -> Result<String, Error> {
+    pub async fn confirm_code(&self, email: &str, code: &str) -> Result<Login, Error> {
         let json = self.login(&json!({ "email": email, "code": code })).await?;
-        json["token"].as_str().map(str::to_owned).ok_or_else(|| network("no token in answer"))
+        let field = |name: &str| json[name].as_str().map(str::to_owned).ok_or_else(|| network(format!("no {name} in answer")));
+        Ok(Login { token: field("token")?, message: field("message")?, image: field("image")? })
+    }
+
+    /// The server address this client talks to.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+
+    /// `GET /image/<name>`: the image bytes.
+    ///
+    /// # Errors
+    /// Network failure or a non-success answer.
+    pub async fn image(&self, name: &str) -> Result<Vec<u8>, Error> {
+        let res = self.http.get(format!("{}/image/{name}", self.base)).send().await.map_err(network)?;
+        if !res.status().is_success() {
+            return Err(Error::Rejected(res.status().to_string()));
+        }
+        Ok(res.bytes().await.map_err(network)?.to_vec())
     }
 
     /// Opens `/ws`, sends `{"type":"ping","n":n}` and returns the `n` of the pong.

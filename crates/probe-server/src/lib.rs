@@ -1,15 +1,19 @@
-//! Local demo server: `/ping`, `/echo`, `/login` (email + one-time code), WebSocket `/ws`.
+//! Local demo server: `/ping`, `/echo`, `/login` (email + one-time code), `/image/{name}`, WebSocket `/ws`.
 //!
 //! `/login` requests must be signed: header `x-probe-key` carries the base64 ed25519 public key,
 //! `x-probe-signature` the base64 signature over the raw request body.
+//!
+//! With `PROBE_MARKER` set, every value the server hands out (code, token, message, image name)
+//! carries that marker, so that a disk scan can tell where each of them ends up.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -57,10 +61,28 @@ fn signed(headers: &HeaderMap, body: &[u8]) -> bool {
     VerifyingKey::from_bytes(&key).is_ok_and(|k| k.verify_strict(body, &Signature::from_bytes(&sig)).is_ok())
 }
 
+static MARKER: LazyLock<Option<String>> = LazyLock::new(|| std::env::var("PROBE_MARKER").ok());
+
+/// `value` itself, or `<marker>-<kind>-<value>` when a marker is set.
+fn marked(kind: &str, value: &str) -> String {
+    MARKER.as_ref().map_or_else(|| value.to_owned(), |marker| format!("{marker}-{kind}-{value}"))
+}
+
 fn new_code() -> Result<String, getrandom::Error> {
     let mut raw = [0u8; 4];
     getrandom::fill(&mut raw)?;
-    Ok(format!("{:06}", u32::from_le_bytes(raw) % 1_000_000))
+    Ok(marked("code", &format!("{:06}", u32::from_le_bytes(raw) % 1_000_000)))
+}
+
+/// A 1x1 PNG followed by the requested name backwards: bytes a disk scan can recognise, distinct
+/// from the name in the URL. Cacheable on purpose.
+async fn image(Path(name): Path<String>) -> Response {
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let Ok(mut body) = B64.decode(PIXEL) else {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "bad_image");
+    };
+    body.extend(name.bytes().rev());
+    ([(CONTENT_TYPE, "image/png"), (CACHE_CONTROL, "public, max-age=86400")], body).into_response()
 }
 
 async fn login(State(codes): State<Codes>, headers: HeaderMap, body: Bytes) -> Response {
@@ -84,7 +106,13 @@ async fn login(State(codes): State<Codes>, headers: HeaderMap, body: Bytes) -> R
         },
         Some(code) if codes.get(&req.email) == Some(&code) => {
             codes.remove(&req.email);
-            Json(json!({ "status": "ok", "token": uuid::Uuid::new_v4().to_string() })).into_response()
+            Json(json!({
+                "status": "ok",
+                "token": marked("token", &uuid::Uuid::new_v4().to_string()),
+                "message": marked("message", "welcome"),
+                "image": marked("image", "probe.png"),
+            }))
+            .into_response()
         }
         Some(_) => error(StatusCode::UNAUTHORIZED, "bad_code"),
     }
@@ -118,6 +146,7 @@ pub fn router() -> Router {
         .route("/echo", post(|Json(v): Json<Value>| async move { Json(v) }))
         .route("/login", post(login))
         .route("/debug/code", get(debug_code))
+        .route("/image/{name}", get(image))
         .route("/ws", get(|up: WebSocketUpgrade| async move { up.on_upgrade(ws_loop) }))
         .with_state(Codes::default())
 }

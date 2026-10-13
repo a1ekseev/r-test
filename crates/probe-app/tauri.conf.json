@@ -9,13 +9,13 @@
   },
   "app": {
     "withGlobalTauri": false,
-    "windows": [{ "label": "main", "title": "Probe", "width": 900, "height": 600 }],
+    "windows": [{ "label": "main", "title": "Probe", "width": 900, "height": 600, "create": false }],
     "security": {
       "csp": {
         "default-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self'",
-        "img-src": "'self' data: blob:",
+        "img-src": "'self' data: blob: probe: http://probe.localhost http://127.0.0.1:*",
         "font-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost",
         "object-src": "'none'",

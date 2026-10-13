@@ -1,8 +1,12 @@
 // E2E: the real built app + the real demo server, driven over plain W3C WebDriver.
 // E2E_DRIVER=external - tauri-driver + the OS webview driver (Linux, Windows); the app has no test code in it.
 // E2E_DRIVER=embedded - WebDriver server inside the app (cargo feature `e2e`); the only option on macOS.
+// PROBE_INCOGNITO=1 reaches the app through either driver and makes it create its window in incognito mode.
+// Used by the disk probe only (embedded driver): E2E_SPECS picks another scenario, APP_WRAP puts a
+// command in front of the app, APP_ARGS adds arguments, APP_QUIT=<flag> ends the app by a second
+// launch carrying that flag instead of killing it.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, openSync } from 'node:fs';
+import { appendFileSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { browser } from '@wdio/globals';
 import { type Server, startServer } from './support/server.ts';
@@ -20,20 +24,41 @@ const tag = `${driver}-run${process.env['E2E_RUN'] ?? '1'}`;
 let server: Server | undefined;
 let child: ChildProcess | undefined;
 
+const words = (name: string) => (process.env[name] ?? '').split(' ').filter(Boolean);
+
+function kill(proc: ChildProcess): void {
+  // On Windows kill() ends only the process itself; the driver's children would survive it.
+  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F']);
+  else proc.kill();
+}
+
 function stop(proc: ChildProcess): Promise<void> {
   if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
   return new Promise((done) => {
-    proc.once('exit', () => done());
-    // On Windows kill() ends only the process itself; the driver's children would survive it.
-    if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F']);
-    else proc.kill();
+    const quit = process.env['APP_QUIT'];
+    if (!quit) {
+      proc.once('exit', () => done());
+      kill(proc);
+      return;
+    }
+    let how = 'graceful';
+    const timer = setTimeout(() => {
+      how = 'killed, the app did not leave within 30 s';
+      kill(proc);
+    }, 30_000);
+    proc.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      appendFileSync(join(artifacts, `${tag}-quit.txt`), `${how} (exit code ${code}, signal ${signal})\n`);
+      done();
+    });
+    spawn(env('APP_BIN'), [quit], { stdio: 'ignore' });
   });
 }
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
   hostname: '127.0.0.1',
-  specs: ['./specs/**/*.e2e.ts'],
+  specs: [process.env['E2E_SPECS'] ?? './specs/**/*.e2e.ts'],
   maxInstances: 1,
   // 'tauri:options' is a tauri-driver extension that the WebdriverIO types do not know
   capabilities: [(driver === 'external' ? { 'tauri:options': { application: env('APP_BIN') } } : {}) as WebdriverIO.Capabilities],
@@ -63,7 +88,8 @@ export const config: WebdriverIO.Config = {
         stdio: ['ignore', log, log],
       });
     } else {
-      child = spawn(env('APP_BIN'), [], {
+      const command = [...words('APP_WRAP'), env('APP_BIN'), ...words('APP_ARGS')];
+      child = spawn(command[0] ?? '', command.slice(1), {
         env: { ...process.env, TAURI_WEBDRIVER_PORT: String(port) },
         stdio: ['ignore', log, log],
       });

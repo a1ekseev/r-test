@@ -17,11 +17,18 @@ fn main() {
     let state = setup::AppState::new(&url, memory).expect("client setup");
 
     // Must be the first plugin: a second launch exits here and notifies the running instance.
-    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
         println!("PROBE_SECOND_INSTANCE");
         drop(app.emit("second-instance", ()));
+        // a second launch can also ask the running instance to leave, without any WebDriver
+        if args.iter().any(|arg| arg == "--quit") {
+            app.exit(0);
+        } else if args.iter().any(|arg| arg == "--terminate") {
+            setup::terminate(app);
+        }
     }));
     let builder = setup::configure(builder, state).setup(|app| {
+        setup::create_window(app)?;
         setup::install_tray(app)?;
         Ok(())
     });

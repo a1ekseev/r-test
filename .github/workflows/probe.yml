@@ -22,12 +22,15 @@ env:
   E2E_RUNS: '5'
   GSUDO_VERSION: 2.6.1
   GSUDO_SHA256: 21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44
+  # "[quick]" in the commit message skips what the disk probe and the embedded driver do not need;
+  # the skipped checks then count as not passed
+  QUICK: ${{ contains(github.event.head_commit.message, '[quick]') }}
 
 jobs:
   desktop:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +86,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-            webkit2gtk-driver xvfb xauth dbus-x11 at-spi2-core gnome-keyring file xdg-utils
+            webkit2gtk-driver xvfb xauth dbus-x11 at-spi2-core gnome-keyring file xdg-utils strace
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
@@ -184,18 +187,21 @@ jobs:
 
       - name: '1b. Unit tests: client against the local server, crypto known-answer tests'
         id: core_test
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 15
         run: cargo test -p probe-core -p probe-server --locked --lib --bins --test api --test kat --test store
 
       - name: '2. TLS: reqwest + rustls + aws-lc-rs + platform verifier with a custom CA (HTTPS and WSS)'
         id: tls
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 10
         run: cargo test -p probe-core --locked --test tls -- --nocapture
 
       - name: '3. Secret storage: keyring on the native OS backend'
         id: keyring
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 10
         run: |
@@ -264,18 +270,21 @@ jobs:
 
       - name: '1c. Build the whole workspace, all targets (includes the Tauri app)'
         id: ws_build
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 40
         run: cargo build --workspace --all-targets --locked
 
       - name: '1d. App unit tests on the Tauri mock runtime'
         id: app_test
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 15
         run: cargo test -p probe-app --locked
 
       - name: '4e. tauri build: unsigned release bundles'
         id: bundle
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 40
         env:
@@ -313,13 +322,14 @@ jobs:
 
       - name: '5. Launch the release binary: window, IPC, CSP, tray, single instance'
         id: launch
+        if: env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 10
         run: bash scripts/gui.sh node scripts/launch-check.mjs "target/release/probe-app$EXE" "target/debug/probe-server$EXE"
 
       - name: '6a. Install tauri-driver for the external driver'
         id: tauri_driver
-        if: runner.os != 'macOS'
+        if: runner.os != 'macOS' && env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 20
         run: |
@@ -353,7 +363,7 @@ jobs:
 
       - name: '6a. E2E, external driver (tauri-driver + OS webview driver), release build'
         id: e2e_external
-        if: runner.os != 'macOS'
+        if: runner.os != 'macOS' && env.QUICK != 'true'
         continue-on-error: true
         timeout-minutes: 20
         run: |
@@ -366,10 +376,30 @@ jobs:
             bash scripts/e2e.sh external
           fi
 
+      - name: '6a. E2E, external driver, incognito window (same release binary, PROBE_INCOGNITO=1)'
+        id: e2e_external_incognito
+        if: runner.os != 'macOS' && env.QUICK != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
+            gsudo --integrity Medium "$(cygpath -w "$BASH")" scripts/e2e.sh external '' incognito
+          else
+            # wry gives an incognito webview on WebKitGTK a context of its own with automation off, so
+            # WebKitWebDriver cannot reach the window. The check is inverted: it must fail, for that reason.
+            if bash scripts/e2e.sh external 2 incognito 2>&1 | tee "$RUNNER_TEMP/external-incognito.log"; then
+              echo "the external driver unexpectedly drove an incognito window"
+              exit 1
+            fi
+            grep -q 'failed to create a new browsing context' "$RUNNER_TEMP/external-incognito.log"
+            echo "fails as expected on WebKitGTK: no automation for an incognito webview (session not created)" >"$NOTES_DIR/e2e_external_incognito"
+          fi
+
       - name: '6a. E2E, external driver: SKIPPED on macOS (no WebDriver exists for WKWebView)'
         if: runner.os == 'macOS'
         run: |
           echo "not applicable on macOS, there is no WebDriver for WKWebView" >"$NOTES_DIR/e2e_external"
+          echo "not applicable on macOS, there is no WebDriver for WKWebView" >"$NOTES_DIR/e2e_external_incognito"
 
       - name: '6b. Build the app with the embedded WebDriver server (feature e2e, debug)'
         id: e2e_build
@@ -382,6 +412,12 @@ jobs:
         continue-on-error: true
         timeout-minutes: 20
         run: bash scripts/e2e.sh embedded
+
+      - name: '6b. E2E, embedded driver, incognito window (same debug binary, PROBE_INCOGNITO=1)'
+        id: e2e_embedded_incognito
+        continue-on-error: true
+        timeout-minutes: 20
+        run: bash scripts/e2e.sh embedded '' incognito
 
       - name: '6c. E2E self-check: a deliberately wrong expectation must fail the run'
         id: e2e_selfcheck
@@ -399,7 +435,25 @@ jobs:
           fi
           echo "the suite failed as it must"
 
-      - name: Upload E2E screenshots and driver logs
+      # On Windows at medium integrity, like a user's session; the app is the debug build with the embedded driver.
+      - name: '8. Disk probe: what the app and its webview write, incognito window and regular'
+        id: disk
+        continue-on-error: true
+        timeout-minutes: 50
+        run: |
+          status=0
+          if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
+            gsudo --integrity Medium "$(cygpath -w "$BASH")" -c 'node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run' || status=$?
+          else
+            { node scripts/disk-probe.mjs selftest && DISK_RESET=1 node scripts/disk-probe.mjs run; } || status=$?
+          fi
+          if [ -f ui/e2e/artifacts/disk/summary.md ]; then
+            cat ui/e2e/artifacts/disk/summary.md >>"$GITHUB_STEP_SUMMARY"
+            grep -c '^| [a-z-]* | pass ' ui/e2e/artifacts/disk/summary.md | sed 's/$/ variant(s) ran their scenario; file lists and marker search results are below and in the artifact/' >"$NOTES_DIR/disk" || true
+          fi
+          exit "$status"
+
+      - name: Upload E2E screenshots, driver logs and disk probe results
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -441,8 +495,11 @@ jobs:
             bundle|4e. tauri build (${{ matrix.bundles }}), unsigned|${{ steps.bundle.outcome }}
             launch|5. Launch release binary: window, IPC, CSP, tray, single instance|${{ steps.launch.outcome }}
             e2e_external|6a. E2E external driver x${{ env.E2E_RUNS }}|${{ runner.os == 'macOS' && 'n/a' || steps.e2e_external.outcome }}
+            e2e_external_incognito|6a. E2E external driver, incognito window (Linux - must fail, Windows - x${{ env.E2E_RUNS }})|${{ runner.os == 'macOS' && 'n/a' || steps.e2e_external_incognito.outcome }}
             e2e_embedded|6b. E2E embedded driver x${{ env.E2E_RUNS }}|${{ steps.e2e_build.outcome == 'success' && steps.e2e_embedded.outcome || steps.e2e_build.outcome }}
+            e2e_embedded_incognito|6b. E2E embedded driver, incognito window x${{ env.E2E_RUNS }}|${{ steps.e2e_build.outcome == 'success' && steps.e2e_embedded_incognito.outcome || steps.e2e_build.outcome }}
             e2e_selfcheck|6c. E2E self-check: broken expectation fails|${{ steps.e2e_embedded.outcome == 'success' && steps.e2e_selfcheck.outcome || 'n/a' }}
+            disk|8. Disk probe: self-test, scenario per variant, storage controls|${{ steps.disk.outcome }}
         run: bash scripts/summary.sh
 
       - name: Verdict (fails if any required check did not pass)

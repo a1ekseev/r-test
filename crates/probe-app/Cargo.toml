@@ -22,6 +22,9 @@ tauri-plugin-single-instance = { workspace = true }
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 serde = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+
 [dev-dependencies]
 tauri = { workspace = true, features = ["test"] }
 serde_json = { workspace = true }

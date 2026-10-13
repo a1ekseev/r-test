@@ -36,8 +36,13 @@ async fn login_with_code() {
     let wrong = if code == "000000" { "111111" } else { "000000" };
     assert!(matches!(client.confirm_code(EMAIL, wrong).await, Err(Error::Rejected(c)) if c == "bad_code"));
 
-    let token = client.confirm_code(EMAIL, &code).await.unwrap();
-    assert_eq!(token.len(), 36, "{token}");
+    let login = client.confirm_code(EMAIL, &code).await.unwrap();
+    assert_eq!(login.token.len(), 36, "{login:?}");
+    assert_eq!(login.message, "welcome");
+    // the image is a PNG followed by its own name backwards
+    let image = client.image(&login.image).await.unwrap();
+    assert!(image.starts_with(b"\x89PNG\r\n\x1a\n"), "{image:?}");
+    assert!(image.ends_with(b"gnp.eborp"), "{image:?}");
     // a code is single-use
     assert!(matches!(client.confirm_code(EMAIL, &code).await, Err(Error::Rejected(c)) if c == "bad_code"));
     server.stop().await.unwrap();
