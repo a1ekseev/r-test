@@ -622,6 +622,7 @@ function run(names) {
 const [command, ...rest] = process.argv.slice(2);
 if (command === 'selftest') selftest();
 else if (command === 'hook') hook();
+else if (command === 'crash') console.log(crash(rest[0])); // used by crashpad-probe.mjs
 else if (command === 'run') {
   const unknown = rest.filter((name) => !VARIANTS[name]);
   if (unknown.length > 0) throw new Error(`unknown variant(s): ${unknown.join(', ')}`);

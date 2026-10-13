@@ -420,6 +420,13 @@ jobs:
             echo "fails as expected on WebKitGTK: no automation for an incognito webview (session not created)" >"$NOTES_DIR/e2e_external_incognito"
           fi
 
+      - name: '6a. E2E, external driver, hardened window on Windows (incognito, own data directory, no autofill, dump cleanup)'
+        id: e2e_external_hardened
+        if: runner.os == 'Windows' && env.QUICK != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: gsudo --integrity Medium "$(cygpath -w "$BASH")" scripts/e2e.sh external '' hardened
+
       - name: '6a. E2E, external driver: SKIPPED on macOS (no WebDriver exists for WKWebView)'
         if: runner.os == 'macOS'
         run: |
@@ -437,6 +444,30 @@ jobs:
         continue-on-error: true
         timeout-minutes: 20
         run: bash scripts/e2e.sh embedded '' incognito
+
+      - name: '6b. E2E, embedded driver, hardened window on Windows (incognito, own data directory, no autofill, dump cleanup)'
+        id: e2e_embedded_hardened
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: bash scripts/e2e.sh embedded '' hardened
+
+      # At medium integrity, like a user's session. The release build when this run has one.
+      - name: '9. Windows: crash dumps of the webview are deleted at exit and at the next start'
+        id: crashpad
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          app=target/release/probe-app.exe
+          [ -f "$app" ] || app=target/debug/probe-app.exe
+          status=0
+          gsudo --integrity Medium "$(cygpath -w "$BASH")" -c "node scripts/crashpad-probe.mjs $app target/debug/probe-server.exe" || status=$?
+          if [ -f ui/e2e/artifacts/crashpad/summary.md ]; then
+            cat ui/e2e/artifacts/crashpad/summary.md >>"$GITHUB_STEP_SUMMARY"
+            grep -c '^- ok: ' ui/e2e/artifacts/crashpad/summary.md | sed 's/$/ check(s) passed; details below/' >"$NOTES_DIR/crashpad" || true
+          fi
+          exit "$status"
 
       - name: '6c. E2E self-check: a deliberately wrong expectation must fail the run'
         id: e2e_selfcheck
@@ -499,8 +530,11 @@ jobs:
             e2e_external_incognito|6a. E2E external driver, incognito window (Linux - must fail, Windows - x${{ env.E2E_RUNS }})|${{ runner.os == 'macOS' && 'n/a' || steps.e2e_external_incognito.outcome }}
             e2e_embedded|6b. E2E embedded driver x${{ env.E2E_RUNS }}|${{ steps.e2e_build.outcome == 'success' && steps.e2e_embedded.outcome || steps.e2e_build.outcome }}
             e2e_embedded_incognito|6b. E2E embedded driver, incognito window x${{ env.E2E_RUNS }}|${{ steps.e2e_build.outcome == 'success' && steps.e2e_embedded_incognito.outcome || steps.e2e_build.outcome }}
+            e2e_external_hardened|6a. E2E external driver, hardened window (Windows) x${{ env.E2E_RUNS }}|${{ runner.os != 'Windows' && 'n/a' || steps.e2e_external_hardened.outcome }}
+            e2e_embedded_hardened|6b. E2E embedded driver, hardened window (Windows) x${{ env.E2E_RUNS }}|${{ runner.os != 'Windows' && 'n/a' || steps.e2e_embedded_hardened.outcome }}
             e2e_selfcheck|6c. E2E self-check: broken expectation fails|${{ steps.e2e_embedded.outcome == 'success' && steps.e2e_selfcheck.outcome || 'n/a' }}
             disk|8. Disk probe: self-test, scenario per variant, storage controls|${{ steps.disk.outcome }}
+            crashpad|9. Crash dump cleanup at exit and at the next start (Windows)|${{ runner.os != 'Windows' && 'n/a' || steps.crashpad.outcome }}
         run: bash scripts/summary.sh
 
       - name: Verdict (fails if any required check did not pass)

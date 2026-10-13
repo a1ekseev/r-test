@@ -28,11 +28,18 @@ fn main() {
         }
     }));
     let builder = setup::configure(builder, state).setup(|app| {
+        // only the first instance gets here, and the webview does not exist yet: dumps left by a
+        // run that did not reach its own exit
+        setup::clean_crash_reports_if_asked("start");
         setup::create_window(app)?;
         setup::install_tray(app)?;
         Ok(())
     });
     #[cfg(feature = "e2e")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
-    builder.run(tauri::generate_context!()).expect("run the application");
+    builder.build(tauri::generate_context!()).expect("build the application").run(|_app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            setup::clean_crash_reports_if_asked("exit");
+        }
+    });
 }

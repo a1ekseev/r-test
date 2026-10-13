@@ -15,7 +15,7 @@ one-time code) and a WebSocket `/ws` that answers ping with pong.
 | `crates/probe-server` | local demo server on `axum` (HTTP + WebSocket), library and binary |
 | `crates/probe-app` | Tauri 2 shell: window, tray, single instance, strict CSP, IPC commands |
 | `ui` | React + Vite + TypeScript frontend, Vitest component tests, WebdriverIO E2E |
-| `scripts` | launch check, E2E runner, disk probe, CI summary, repository hygiene check |
+| `scripts` | launch check, E2E runner, disk probe, crash dump probe, CI summary, repository hygiene check |
 | `docker` | Linux image for running everything locally |
 
 ## What CI checks
@@ -45,9 +45,15 @@ does not stop the job, and the last step fails the job if any required check fai
    application state, and a relocated webview data directory. A self-test proves that the
    comparison and the search can fail.
 
+9. Windows: crash dumps of the webview (`scripts/crashpad-probe.mjs`). The crash handler of
+   WebView2 cannot be switched off, so with `PROBE_CLEAN_CRASHPAD=1` and `PROBE_DATA_DIR` the app
+   deletes `EBWebView/Crashpad/reports` and `attachments` at start and at exit. The probe crashes
+   the renderer and checks the dump after a regular leave, after a kill, and after the next start.
+   The E2E suite also runs in a `hardened` window mode with all of these settings together.
+
 The window is created in `setup` so that its mode can be chosen at run time: `PROBE_INCOGNITO=1`,
 `PROBE_DATA_DIR=<path>`, `PROBE_BROWSER_ARGS=<args>` and `PROBE_AUTOFILL=0` (WebView2),
-`PROBE_RESTORABLE=0` (macOS).
+`PROBE_RESTORABLE=0` (macOS), `PROBE_CLEAN_CRASHPAD=1` (WebView2, needs `PROBE_DATA_DIR`).
 A second launch with `--quit` (or `--terminate`, the Cmd+Q path on macOS) ends the running instance.
 
 ## Running locally on Linux (Docker)

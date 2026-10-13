@@ -27,6 +27,29 @@ pub(crate) fn flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1")
 }
 
+/// Deletes the crash dumps the webview left under `<data dir>/EBWebView/Crashpad` (the WebView2
+/// layout); the handler's own bookkeeping files stay. Returns how many entries went and how many
+/// could not be deleted.
+pub(crate) fn clean_crash_reports(data_dir: &std::path::Path) -> (usize, usize) {
+    let (mut removed, mut failed) = (0, 0);
+    for sub in ["reports", "attachments"] {
+        let Ok(entries) = std::fs::read_dir(data_dir.join("EBWebView").join("Crashpad").join(sub)) else { continue };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let gone = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            if gone.is_ok() { removed += 1 } else { failed += 1 }
+        }
+    }
+    (removed, failed)
+}
+
+/// `PROBE_CLEAN_CRASHPAD=1` together with `PROBE_DATA_DIR`: the cleanup above, at start and at exit.
+pub(crate) fn clean_crash_reports_if_asked(when: &str) {
+    if let (true, Ok(dir)) = (flag("PROBE_CLEAN_CRASHPAD"), std::env::var("PROBE_DATA_DIR")) {
+        let (removed, failed) = clean_crash_reports(dir.as_ref());
+        println!("PROBE_CRASHPAD when={when} removed={removed} failed={failed}");
+    }
+}
+
 pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>, state: AppState) -> tauri::Builder<R> {
     builder
         .manage(state)

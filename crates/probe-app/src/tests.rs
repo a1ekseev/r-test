@@ -50,3 +50,21 @@ fn unknown_command_is_rejected() {
     let err = invoke("no_such_command", serde_json::json!({})).unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
 }
+
+#[test]
+fn crash_report_cleanup_removes_dumps_and_keeps_bookkeeping() {
+    let data = std::env::temp_dir().join(format!("probe-clean-test-{}", std::process::id()));
+    let crashpad = data.join("EBWebView").join("Crashpad");
+    std::fs::create_dir_all(crashpad.join("reports")).unwrap();
+    std::fs::create_dir_all(crashpad.join("attachments").join("nested")).unwrap();
+    std::fs::write(crashpad.join("reports").join("a.dmp"), b"dump").unwrap();
+    std::fs::write(crashpad.join("metadata"), b"meta").unwrap();
+    assert_eq!(crate::setup::clean_crash_reports(&data), (2, 0));
+    assert_eq!(std::fs::read_dir(crashpad.join("reports")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(crashpad.join("attachments")).unwrap().count(), 0);
+    assert!(crashpad.join("metadata").exists());
+    // nothing to do, and no directory at all, are both fine
+    assert_eq!(crate::setup::clean_crash_reports(&data), (0, 0));
+    std::fs::remove_dir_all(&data).unwrap();
+    assert_eq!(crate::setup::clean_crash_reports(&data), (0, 0));
+}
