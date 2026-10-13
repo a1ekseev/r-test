@@ -61,7 +61,8 @@ jobs:
           } >>"$GITHUB_ENV"
 
       - name: Cache cargo registry, tauri-driver and pnpm store
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -154,7 +155,12 @@ jobs:
           }
           $driverVersion = (& $driver --version) -join ' '
           "native webdriver=$driverVersion, $source" >> (Join-Path $env:NOTES_DIR 'versions')
-          "NATIVE_DRIVER=$driver" >> $env:GITHUB_ENV
+          # tauri-driver discards the native driver's output; the wrapper makes msedgedriver log to a file
+          $wrapper = Join-Path $dir 'msedgedriver-logged.cmd'
+          Set-Content -Path $wrapper -Encoding ascii -Value "@`"$driver`" --verbose --log-path=`"%MSEDGEDRIVER_LOG%`" %*"
+          "NATIVE_DRIVER=$wrapper" >> $env:GITHUB_ENV
+          $label = (& "$env:SystemRoot\System32\whoami.exe" /groups | Select-String 'Mandatory Label') -replace '\s+', ' '
+          "job integrity level=$label" >> (Join-Path $env:NOTES_DIR 'versions')
           Get-Content (Join-Path $env:NOTES_DIR 'versions')
 
       # ---- checks: each one may fail without stopping the job; the last step gives the verdict ----
@@ -320,12 +326,37 @@ jobs:
           fi
           echo "tauri-driver=$TAURI_DRIVER_VERSION" >>"$NOTES_DIR/versions"
 
+      # WebView2 150+ ignores WEBVIEW2_* environment variables in an elevated process, and that is how
+      # msedgedriver hands over the debugging port; the runner job is elevated (tauri-apps/wry#1782).
+      - name: '6a. Windows: gsudo, to run the external driver chain at medium integrity'
+        id: deelevate
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          winget install gerardog.gsudo --accept-source-agreements --accept-package-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { choco install gsudo -y --no-progress }
+          $gsudo = Join-Path $env:ProgramFiles 'gsudo\Current'
+          if (-not (Test-Path (Join-Path $gsudo 'gsudo.exe'))) { throw 'gsudo is not installed' }
+          $gsudo >> $env:GITHUB_PATH
+          # a medium integrity token has no administrator rights, so open up what the tests write to
+          icacls "$env:GITHUB_WORKSPACE" /grant 'Everyone:(OI)(CI)F' /Q
+          icacls "$env:RUNNER_TEMP" /grant 'Everyone:(OI)(CI)F' /Q
+
       - name: '6a. E2E, external driver (tauri-driver + OS webview driver), release build'
         id: e2e_external
         if: runner.os != 'macOS'
         continue-on-error: true
         timeout-minutes: 20
-        run: bash scripts/e2e.sh external
+        run: |
+          if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
+            label=$(gsudo --integrity Medium "$SYSTEMROOT/System32/whoami.exe" //groups | grep -i 'Mandatory Label' | tr -s ' ' || true)
+            echo "external driver chain integrity level=$label" | tee -a "$NOTES_DIR/versions"
+            gsudo --integrity Medium "$(cygpath -w "$BASH")" scripts/e2e.sh external
+          else
+            bash scripts/e2e.sh external
+          fi
 
       - name: '6a. E2E, external driver: SKIPPED on macOS (no WebDriver exists for WKWebView)'
         if: runner.os == 'macOS'
@@ -369,6 +400,18 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
           path: ui/e2e/artifacts/
+
+      - name: Save the cache (also when checks failed)
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/bin/tauri-driver*
+            ${{ runner.temp }}/pnpm-store
+          key: deps-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'ui/pnpm-lock.yaml', 'rust-toolchain.toml') }}
 
       # ---- summary and verdict ----------------------------------------------------------------
       - name: '7. Summary'

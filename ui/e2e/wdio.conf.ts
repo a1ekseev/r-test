@@ -58,7 +58,10 @@ export const config: WebdriverIO.Config = {
       const args = ['--port', String(port), '--native-port', String(await freePort())];
       const native = process.env['NATIVE_DRIVER'];
       if (native) args.push('--native-driver', native);
-      child = spawn('tauri-driver', args, { stdio: ['ignore', log, log] });
+      child = spawn('tauri-driver', args, {
+        env: { ...process.env, MSEDGEDRIVER_LOG: join(artifacts, `${tag}-msedgedriver.log`) },
+        stdio: ['ignore', log, log],
+      });
     } else {
       child = spawn(env('APP_BIN'), [], {
         env: { ...process.env, TAURI_WEBDRIVER_PORT: String(port) },
