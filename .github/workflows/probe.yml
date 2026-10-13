@@ -20,6 +20,8 @@ env:
   PNPM_VERSION: 12.11.2
   TAURI_DRIVER_VERSION: 2.1.0
   E2E_RUNS: '5'
+  GSUDO_VERSION: 2.6.1
+  GSUDO_SHA256: 21130BF178D7B9891207F00BFF56F05B6B363CE9CEC7B2D084E45FB12EE51F44
 
 jobs:
   desktop:
@@ -335,10 +337,15 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: |
-          winget install gerardog.gsudo --accept-source-agreements --accept-package-agreements --disable-interactivity
-          if ($LASTEXITCODE -ne 0) { choco install gsudo -y --no-progress }
-          $gsudo = Join-Path $env:ProgramFiles 'gsudo\Current'
-          if (-not (Test-Path (Join-Path $gsudo 'gsudo.exe'))) { throw 'gsudo is not installed' }
+          # the pinned portable build: winget is missing on the arm64 runner image
+          $zip = Join-Path $env:RUNNER_TEMP 'gsudo.zip'
+          Invoke-WebRequest "https://github.com/gerardog/gsudo/releases/download/v$env:GSUDO_VERSION/gsudo.portable.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:GSUDO_SHA256) { throw 'gsudo archive checksum mismatch' }
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'gsudo') -Force
+          $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $gsudo = Join-Path $env:RUNNER_TEMP "gsudo\$arch"
+          if (-not (Test-Path (Join-Path $gsudo 'gsudo.exe'))) { Get-ChildItem (Join-Path $env:RUNNER_TEMP 'gsudo') -Recurse -Name; throw 'gsudo.exe not found in the archive' }
+          "gsudo=$env:GSUDO_VERSION ($arch)" >> (Join-Path $env:NOTES_DIR 'versions')
           $gsudo >> $env:GITHUB_PATH
           # a medium integrity token has no administrator rights, so open up what the tests write to
           icacls "$env:GITHUB_WORKSPACE" /grant 'Everyone:(OI)(CI)F' /Q
@@ -351,7 +358,8 @@ jobs:
         timeout-minutes: 20
         run: |
           if [ "$RUNNER_OS" = Windows ] && command -v gsudo >/dev/null; then
-            label=$(gsudo --integrity Medium "$SYSTEMROOT/System32/whoami.exe" //groups | grep -i 'Mandatory Label' | tr -s ' ' || true)
+            # shellcheck disable=SC2016  # expanded by the inner shell on purpose
+            label=$(gsudo --integrity Medium "$(cygpath -w "$BASH")" -c '"$SYSTEMROOT/System32/whoami.exe" //groups' | grep -i 'Mandatory Label' | tr -s ' ' || true)
             echo "external driver chain integrity level=$label" | tee -a "$NOTES_DIR/versions"
             gsudo --integrity Medium "$(cygpath -w "$BASH")" scripts/e2e.sh external
           else
